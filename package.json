@@ -1,0 +1,39 @@
+{
+    "name": "courvux-precompiler",
+    "version": "0.1.0",
+    "description": "Build-time expression precompiler for the Courvux reactive UI framework. Compiles template expressions to JS arrow functions so apps can ship without script-src 'unsafe-eval'.",
+    "author": "Vanjex",
+    "license": "MIT",
+    "repository": "github:vanjexdev/courvux-precompiler",
+    "homepage": "https://github.com/vanjexdev/courvux-precompiler",
+    "bugs": "https://github.com/vanjexdev/courvux-precompiler/issues",
+    "keywords": [
+        "courvux",
+        "compiler",
+        "template",
+        "csp",
+        "wasm",
+        "vite-plugin"
+    ],
+    "main": "pkg/courvux_precompiler.js",
+    "types": "pkg/courvux_precompiler.d.ts",
+    "files": [
+        "pkg/courvux_precompiler.js",
+        "pkg/courvux_precompiler.d.ts",
+        "pkg/courvux_precompiler_bg.wasm",
+        "pkg/courvux_precompiler_bg.wasm.d.ts",
+        "pkg/package.json",
+        "README.md",
+        "LICENSE"
+    ],
+    "scripts": {
+        "build": "wasm-pack build --target nodejs --release",
+        "build:web": "wasm-pack build --target web --release",
+        "test:rust": "cargo test --lib",
+        "test:node": "node test/smoke.mjs",
+        "test": "npm run test:rust && npm run build && npm run test:node"
+    },
+    "engines": {
+        "node": ">=18"
+    }
+}

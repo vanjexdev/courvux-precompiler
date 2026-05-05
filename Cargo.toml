@@ -1,0 +1,30 @@
+[package]
+name = "courvux-precompiler"
+version = "0.1.0"
+edition = "2021"
+authors = ["Vanjex <vanjexdev@gmail.com>"]
+license = "MIT"
+description = "Build-time expression precompiler for the Courvux reactive UI framework. Compiles template expressions to JS arrow functions so apps can ship with `Content-Security-Policy: script-src 'self'` (no `unsafe-eval`)."
+repository = "https://github.com/vanjexdev/courvux-precompiler"
+readme = "README.md"
+keywords = ["courvux", "compiler", "template", "csp", "wasm"]
+categories = ["compilers", "wasm", "web-programming"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = "z"      # size, not speed — this runs once per build
+lto = true
+codegen-units = 1
+strip = true
+
+# Skip the bundled wasm-opt pass. It chokes on bulk-memory ops emitted by
+# Rust 1.92+, and the rustc opt-level=z + LTO above already gives us a
+# small enough binary for a build-time tool. Re-enable when wasm-pack
+# ships with a newer wasm-opt.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
