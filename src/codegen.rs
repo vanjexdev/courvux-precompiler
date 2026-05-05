@@ -18,7 +18,7 @@ use crate::parser::{AssignOp, BinOp, Expr, ObjectProp};
 ///   paths through `evaluate` already, just split via `splitLvalue`); kept for
 ///   symmetry / future writer-only paths.
 pub fn compile(expr: &Expr, mode: Mode) -> String {
-    let body = emit(expr);
+    let body = emit(expr, &[]);
     match mode {
         Mode::Read  => format!("(($s) => ({}))", body),
         Mode::Write => format!("(($s, __v) => {{ {} }})", body),
@@ -28,7 +28,11 @@ pub fn compile(expr: &Expr, mode: Mode) -> String {
 #[derive(Copy, Clone)]
 pub enum Mode { Read, Write }
 
-fn emit(e: &Expr) -> String {
+/// Identifier scope at this emit site. Identifiers found in `scope` resolve
+/// as locals (e.g. arrow function parameters); everything else resolves
+/// through the state proxy as `$s.<name>`. Mirrors the runtime `with(state)`
+/// semantics where local arrow-param bindings shadow state properties.
+fn emit(e: &Expr, scope: &[String]) -> String {
     match e {
         Expr::Number(n)    => format_number(*n),
         Expr::Str(s)       => js_string(s),
@@ -37,10 +41,10 @@ fn emit(e: &Expr) -> String {
         Expr::Null         => "null".into(),
         Expr::Undefined    => "undefined".into(),
 
-        Expr::Ident(name) => emit_ident_read(name),
+        Expr::Ident(name) => emit_ident_read(name, scope),
 
         Expr::Member { object, property, optional } => {
-            let obj = emit(object);
+            let obj = emit(object, scope);
             if *optional {
                 format!("({}?.{})", obj, property)
             } else {
@@ -52,25 +56,25 @@ fn emit(e: &Expr) -> String {
         }
 
         Expr::Index { object, index } => {
-            format!("{}[{}]", emit(object), emit(index))
+            format!("{}[{}]", emit(object, scope), emit(index, scope))
         }
 
         Expr::Call { callee, args } => {
             // Detect synthetic ?.call() shape — see parser
             if let Expr::Member { property, optional, object } = callee.as_ref() {
                 if *optional && property == "__optional_call__" {
-                    let obj = emit(object);
-                    let arg_src = args.iter().map(emit).collect::<Vec<_>>().join(", ");
+                    let obj = emit(object, scope);
+                    let arg_src = args.iter().map(|a| emit(a, scope)).collect::<Vec<_>>().join(", ");
                     return format!("(({} == null) ? undefined : {}({}))", obj, obj, arg_src);
                 }
             }
-            let arg_src = args.iter().map(emit).collect::<Vec<_>>().join(", ");
-            format!("{}({})", emit(callee), arg_src)
+            let arg_src = args.iter().map(|a| emit(a, scope)).collect::<Vec<_>>().join(", ");
+            format!("{}({})", emit(callee, scope), arg_src)
         }
 
-        Expr::Neg(e) => format!("(-{})", emit(e)),
-        Expr::Pos(e) => format!("(+{})", emit(e)),
-        Expr::Not(e) => format!("(!{})", emit(e)),
+        Expr::Neg(e) => format!("(-{})", emit(e, scope)),
+        Expr::Pos(e) => format!("(+{})", emit(e, scope)),
+        Expr::Not(e) => format!("(!{})", emit(e, scope)),
 
         Expr::Binary { op, left, right } => {
             let op_str = match op {
@@ -80,54 +84,74 @@ fn emit(e: &Expr) -> String {
                 BinOp::Eq | BinOp::StrictEq => "===",
                 BinOp::NotEq | BinOp::StrictNotEq => "!==",
             };
-            format!("({} {} {})", emit(left), op_str, emit(right))
+            format!("({} {} {})", emit(left, scope), op_str, emit(right, scope))
         }
 
-        Expr::And(l, r)      => format!("({} && {})", emit(l), emit(r)),
-        Expr::Or(l, r)       => format!("({} || {})", emit(l), emit(r)),
-        Expr::Coalesce(l, r) => format!("({} ?? {})", emit(l), emit(r)),
+        Expr::And(l, r)      => format!("({} && {})", emit(l, scope), emit(r, scope)),
+        Expr::Or(l, r)       => format!("({} || {})", emit(l, scope), emit(r, scope)),
+        Expr::Coalesce(l, r) => format!("({} ?? {})", emit(l, scope), emit(r, scope)),
 
         Expr::Ternary { cond, then_branch, else_branch } => {
-            format!("({} ? {} : {})", emit(cond), emit(then_branch), emit(else_branch))
+            format!("({} ? {} : {})", emit(cond, scope), emit(then_branch, scope), emit(else_branch, scope))
         }
 
-        Expr::Assign { target, op, value } => emit_assign(target, *op, value),
+        Expr::Assign { target, op, value } => emit_assign(target, *op, value, scope),
 
-        Expr::UpdatePrefix  { target, increment } => emit_update(target, *increment, true),
-        Expr::UpdatePostfix { target, increment } => emit_update(target, *increment, false),
+        Expr::UpdatePrefix  { target, increment } => emit_update(target, *increment, true, scope),
+        Expr::UpdatePostfix { target, increment } => emit_update(target, *increment, false, scope),
 
         Expr::Object(props) => {
             let parts: Vec<String> = props.iter().map(|p| match p {
-                ObjectProp::KeyValue(k, v) => format!("{}: {}", quote_key(k), emit(v)),
-                ObjectProp::Computed(k, v) => format!("[{}]: {}", emit(k), emit(v)),
-                ObjectProp::Shorthand(name) => format!("{}: {}", name, emit_ident_read(name)),
-                ObjectProp::Spread(e)      => format!("...{}", emit(e)),
+                ObjectProp::KeyValue(k, v) => format!("{}: {}", quote_key(k), emit(v, scope)),
+                ObjectProp::Computed(k, v) => format!("[{}]: {}", emit(k, scope), emit(v, scope)),
+                ObjectProp::Shorthand(name) => format!("{}: {}", name, emit_ident_read(name, scope)),
+                ObjectProp::Spread(e)      => format!("...{}", emit(e, scope)),
             }).collect();
             format!("({{ {} }})", parts.join(", "))
         }
 
         Expr::Array(items) => {
-            let parts: Vec<String> = items.iter().map(emit).collect();
+            let parts: Vec<String> = items.iter().map(|i| emit(i, scope)).collect();
             format!("[{}]", parts.join(", "))
         }
 
         Expr::Sequence(items) => {
-            let parts: Vec<String> = items.iter().map(emit).collect();
+            let parts: Vec<String> = items.iter().map(|i| emit(i, scope)).collect();
             format!("({})", parts.join(", "))
+        }
+
+        Expr::Arrow { params, body } => {
+            // Extend scope with the arrow params so identifier reads inside
+            // the body resolve to the local binding instead of `$s.<name>`.
+            // This matches `with(state)` runtime semantics where the inner
+            // function's parameter shadows any same-named state key.
+            let mut child_scope: Vec<String> = scope.to_vec();
+            for p in params { child_scope.push(p.clone()); }
+            let params_src = params.join(", ");
+            let body_src = emit(body, &child_scope);
+            if params.len() == 1 {
+                format!("({} => {})", params_src, body_src)
+            } else {
+                format!("(({}) => {})", params_src, body_src)
+            }
         }
     }
 }
 
-fn emit_ident_read(name: &str) -> String {
-    // Read identifiers through the state proxy. The runtime's proxy `has` is
-    // catch-all so `$s.foo` returns undefined for unknown keys, matching the
-    // pre-precompiler `with(state)` behavior.
-    format!("$s.{}", name)
+fn emit_ident_read(name: &str, scope: &[String]) -> String {
+    // Local binding (arrow param) → emit as-is. Otherwise route through the
+    // state proxy so unknown names produce undefined instead of ReferenceError,
+    // matching the pre-precompiler `with(state)` behavior.
+    if scope.iter().any(|s| s == name) {
+        name.to_string()
+    } else {
+        format!("$s.{}", name)
+    }
 }
 
-fn emit_assign(target: &Expr, op: AssignOp, value: &Expr) -> String {
-    let value_src = emit(value);
-    let lhs = emit(target);
+fn emit_assign(target: &Expr, op: AssignOp, value: &Expr, scope: &[String]) -> String {
+    let value_src = emit(value, scope);
+    let lhs = emit(target, scope);
     let op_str = match op {
         AssignOp::Set => "=",
         AssignOp::Add => "+=",
@@ -139,8 +163,8 @@ fn emit_assign(target: &Expr, op: AssignOp, value: &Expr) -> String {
     format!("({} {} {})", lhs, op_str, value_src)
 }
 
-fn emit_update(target: &Expr, increment: bool, prefix: bool) -> String {
-    let lhs = emit(target);
+fn emit_update(target: &Expr, increment: bool, prefix: bool, scope: &[String]) -> String {
+    let lhs = emit(target, scope);
     let op = if increment { "++" } else { "--" };
     if prefix {
         format!("({}{})", op, lhs)
