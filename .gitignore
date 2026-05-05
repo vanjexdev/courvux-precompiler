@@ -1,5 +1,9 @@
 /target
-/pkg
 /node_modules
 *.log
 .DS_Store
+
+# pkg/ IS committed — same pattern as dist/ in cv-framework. The `npm run
+# build` script regenerates the four files we ship and removes the
+# wasm-pack auto-generated noise (.gitignore, duplicate README/LICENSE,
+# pkg/package.json) so the diff stays clean.

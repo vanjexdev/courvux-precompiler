@@ -27,8 +27,8 @@
         "LICENSE"
     ],
     "scripts": {
-        "build": "wasm-pack build --target nodejs --release",
-        "build:web": "wasm-pack build --target web --release",
+        "build": "wasm-pack build --target nodejs --release && rm -f pkg/.gitignore pkg/package.json pkg/README.md pkg/LICENSE",
+        "build:web": "wasm-pack build --target web --release && rm -f pkg/.gitignore pkg/package.json pkg/README.md pkg/LICENSE",
         "test:rust": "cargo test --lib",
         "test:node": "node test/smoke.mjs",
         "test": "npm run test:rust && npm run build && npm run test:node"
