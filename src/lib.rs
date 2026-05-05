@@ -166,4 +166,45 @@ mod tests {
         assert!(compile_expression("class X {}").is_err());
         assert!(compile_expression("/regex/").is_err());
     }
+
+    #[test]
+    fn arrow_functions_with_scope() {
+        // Bare param shadows state — `t` in the body must resolve to the
+        // local arrow parameter, not `$s.t`.
+        assert_eq!(
+            ok("todos.filter(t => !t.done).length"),
+            "(($s) => ($s.todos.filter((t => (!t.done))).length))"
+        );
+        // Multi-param arrow.
+        assert_eq!(
+            ok("items.reduce((acc, x) => acc + x, 0)"),
+            "(($s) => ($s.items.reduce(((acc, x) => (acc + x)), 0)))"
+        );
+        // Empty-arg arrow (rare but legal).
+        assert_eq!(
+            ok("(() => count)()"),
+            "(($s) => ((() => $s.count)()))"
+        );
+        // Identifier outside arrow body still resolves through state.
+        assert_eq!(
+            ok("items.some(x => x.id === selectedId)"),
+            "(($s) => ($s.items.some((x => (x.id === $s.selectedId)))))"
+        );
+    }
+
+    #[test]
+    fn semicolon_separated_handler_statements() {
+        // Multi-statement event handlers like `@click="a = 1; b = 2"`.
+        assert_eq!(
+            ok("a = 1; b = 2"),
+            "(($s) => ((($s.a = 1), ($s.b = 2))))"
+        );
+        // Mixed comma + semicolon both work.
+        assert_eq!(
+            ok("a = 1; b = 2, c = 3"),
+            "(($s) => ((($s.a = 1), ($s.b = 2), ($s.c = 3))))"
+        );
+        // Trailing semicolon doesn't introduce a phantom item.
+        assert_eq!(ok("count++;"), "(($s) => (($s.count++)))");
+    }
 }

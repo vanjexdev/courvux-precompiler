@@ -60,8 +60,15 @@ pub enum Expr {
     // Array literal: [1, 2, x]
     Array(Vec<Expr>),
 
-    // Sequence (comma): (a, b) — used inside event handlers like `@click="a; b"`
+    // Sequence (comma OR semicolon): (a, b) or (a; b) — used inside event
+    // handlers like `@click="a = 1; b = 2"`. Both punctuators are treated
+    // identically because templates already use them interchangeably.
     Sequence(Vec<Expr>),
+
+    // Arrow function: `t => !t.done`, `(a, b) => a + b`. Block-body (`=>{...}`)
+    // is intentionally not supported — it would push toward arbitrary code in
+    // templates. Single-expression body only.
+    Arrow { params: Vec<String>, body: Box<Expr> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,21 +131,29 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_full(&mut self) -> Result<Expr, ParseError> {
-        // Allow a top-level sequence (comma-separated expressions) so event
-        // handlers like `@click="a = 1, b = 2"` parse cleanly. cv-model and
-        // {{ ... }} normally have a single expression.
+        // Allow a top-level sequence joined by comma OR semicolon so event
+        // handlers like `@click="a = 1, b = 2"` and `@click="a = 1; b = 2"`
+        // both parse cleanly. cv-model and {{ ... }} normally have a single
+        // expression but pay no cost for this branch when there's no separator.
         let first = self.parse_assignment()?;
-        if self.eat(&Token::Comma) {
+        if matches!(self.peek(), Some(Token::Comma) | Some(Token::Semicolon)) {
+            self.advance();
             let mut items = vec![first];
             loop {
+                // Tolerate trailing separators (`a; b;` and `a, b,`).
+                if self.peek().is_none() { break; }
                 items.push(self.parse_assignment()?);
-                if !self.eat(&Token::Comma) { break; }
+                if matches!(self.peek(), Some(Token::Comma) | Some(Token::Semicolon)) {
+                    self.advance();
+                } else {
+                    break;
+                }
             }
             self.ensure_eof()?;
-            return Ok(Expr::Sequence(items));
+            // Single survivor (e.g. `a;`) is just the expression itself —
+            // no need to wrap it in a Sequence.
+            return Ok(if items.len() == 1 { items.pop().unwrap() } else { Expr::Sequence(items) });
         }
-        // Tolerate a trailing semicolon for handler-style expressions.
-        let _ = self.eat(&Token::Semicolon);
         self.ensure_eof()?;
         Ok(first)
     }
@@ -408,6 +423,16 @@ impl<'a> Parser<'a> {
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         let pos_start = self.pos();
+
+        // Arrow function with bare single parameter: `t => body`.
+        // Detect via 2-token lookahead: Ident followed by Arrow.
+        if let (Some(Token::Ident(_)), Some(Token::Arrow)) = (self.peek(), self.peek_at(1)) {
+            let name = if let Some(Token::Ident(s)) = self.advance() { s } else { unreachable!() };
+            self.advance(); // consume `=>`
+            let body = self.parse_assignment()?;
+            return Ok(Expr::Arrow { params: vec![name], body: Box::new(body) });
+        }
+
         let tok = self.advance().ok_or_else(|| ParseError {
             message: "unexpected end of expression".into(),
             pos: pos_start,
@@ -422,6 +447,36 @@ impl<'a> Parser<'a> {
             Token::Undefined    => Ok(Expr::Undefined),
             Token::Ident(name)  => Ok(Expr::Ident(name)),
             Token::LParen => {
+                // Could be:
+                //   (expr)                     → parenthesized expression
+                //   ()  =>  body               → arrow with no params
+                //   (a, b, ...)  =>  body      → arrow with multiple params
+                //   (a)  =>  body              → arrow with single param (in parens)
+                //
+                // We disambiguate by trying the parenthesized-expression path
+                // first and reinterpreting after the `)` if `=>` follows.
+                if matches!(self.peek(), Some(Token::RParen)) {
+                    // ()  =>  body  — no-arg arrow
+                    self.advance(); // )
+                    if !matches!(self.peek(), Some(Token::Arrow)) {
+                        return Err(ParseError {
+                            message: "empty `()` is only valid as the parameter list of an arrow function".into(),
+                            pos: self.pos(),
+                        });
+                    }
+                    self.advance(); // =>
+                    let body = self.parse_assignment()?;
+                    return Ok(Expr::Arrow { params: vec![], body: Box::new(body) });
+                }
+                let saved = self.cursor;
+                // Speculatively try to parse a comma-separated identifier list
+                // followed by `) =>`. If that pattern holds, it's an arrow.
+                if let Some(params) = self.try_parse_arrow_params() {
+                    self.advance(); // =>
+                    let body = self.parse_assignment()?;
+                    return Ok(Expr::Arrow { params, body: Box::new(body) });
+                }
+                self.cursor = saved;
                 let e = self.parse_assignment()?;
                 self.expect(&Token::RParen, "after parenthesized expression")?;
                 Ok(e)
@@ -486,6 +541,34 @@ impl<'a> Parser<'a> {
 
 fn is_assignable(e: &Expr) -> bool {
     matches!(e, Expr::Ident(_) | Expr::Member { .. } | Expr::Index { .. })
+}
+
+impl<'a> Parser<'a> {
+    /// Speculative arrow-parameter parser. Used after seeing `(` to decide
+    /// whether we're inside a parenthesized expression or an arrow function.
+    /// Returns Some(params) only if the lookahead matches the strict shape
+    /// `Ident (, Ident)* ) =>`. Anything else returns None and the caller
+    /// rewinds the cursor and reparses as a regular expression.
+    fn try_parse_arrow_params(&mut self) -> Option<Vec<String>> {
+        let mut params = Vec::new();
+        loop {
+            match self.peek() {
+                Some(Token::Ident(s)) => {
+                    params.push(s.clone());
+                    self.advance();
+                }
+                _ => return None,
+            }
+            match self.peek() {
+                Some(Token::Comma) => { self.advance(); continue; }
+                Some(Token::RParen) => break,
+                _ => return None,
+            }
+        }
+        // We're on `)` now; need `) =>`.
+        self.advance(); // )
+        if matches!(self.peek(), Some(Token::Arrow)) { Some(params) } else { None }
+    }
 }
 
 pub fn parse(src: &str) -> Result<Expr, ParseError> {
